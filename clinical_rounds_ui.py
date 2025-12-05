@@ -30,11 +30,11 @@ from judge_agent import JudgeAgent
 from cost_estimator import CostEstimator
 from data_models import ActionType, AgentAction, GatekeeperResponse
 from utils.llm_client import chat_completion_with_retries
+import os
+from dotenv import load_dotenv
+load_dotenv()
 
-DEFAULT_DATASET = Path(
-    "/Users/yufei/Desktop/SDBench/converted/test-00000-of-00001.jsonl"
-)
-
+DEFAULT_DATASET = Path(__file__).parent / "shzyk/DiagnosisArena/data/test-00000-of-00001.jsonl"
 
 @st.cache_resource
 def load_cases(dataset_path: str) -> List[CaseFile]:
@@ -197,6 +197,8 @@ Diagnosis options (choose the single best answer and quote it verbatim; reply wi
 {option_lines}
 """
 
+    print(f"Model: {model_name}", flush=True)
+    print(f'User_prompt: {user_prompt.strip()}', flush=True)
     try:
         completion = chat_completion_with_retries(
             client=client,
@@ -206,9 +208,10 @@ Diagnosis options (choose the single best answer and quote it verbatim; reply wi
                 {"role": "user", "content": user_prompt.strip()},
             ],
             temperature=temperature,
-            max_tokens=220,
+            # max_tokens=220,
         )
         content = completion.choices[0].message.content.strip()
+        print(f"Content: {content}", flush=True)
         return content
     except Exception as exc:
         st.error(f"AI resident could not draft a response: {exc}")
