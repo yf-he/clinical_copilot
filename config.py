@@ -2,7 +2,11 @@
 
 import os
 from typing import Optional
-from openai import OpenAI
+from openai import OpenAI, AzureOpenAI
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 
 class Config:
@@ -10,7 +14,7 @@ class Config:
 
     # Provider selection: 'openai' or 'openrouter'
     API_PROVIDER: str = os.getenv("SDBENCH_API_PROVIDER", "openrouter").lower()
-
+    print(API_PROVIDER)
     # OpenAI API settings
     OPENAI_API_KEY: Optional[str] = os.getenv("OPENAI_API_KEY")
 
@@ -25,6 +29,11 @@ class Config:
     PATIENT_AGENT_MODEL: str = os.getenv("SDBENCH_PATIENT_MODEL", GATEKEEPER_MODEL)
     EXAMINATION_AGENT_MODEL: str = os.getenv("SDBENCH_EXAM_MODEL", GATEKEEPER_MODEL)
     JUDGE_MODEL: str = os.getenv("SDBENCH_JUDGE_MODEL", "openai/gpt-4o-mini")
+
+    # Azure OpenAI API settings
+    AZURE_OPENAI_API_KEY: Optional[str] = os.getenv("AZURE_OPENAI_API_KEY")
+    AZURE_OPENAI_BASE_URL: str = os.getenv("AZURE_OPENAI_BASE_URL", "https://medevalkit.openai.azure.com/")
+    AZURE_OPENAI_API_VERSION: str = os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
 
     # Cost settings
     PHYSICIAN_VISIT_COST: float = 300.0
@@ -43,6 +52,14 @@ class Config:
             if not cls.OPENROUTER_API_KEY:
                 raise ValueError("OPENROUTER_API_KEY environment variable is required for OpenRouter")
             return OpenAI(base_url=cls.OPENROUTER_BASE_URL, api_key=cls.OPENROUTER_API_KEY)
+        elif cls.API_PROVIDER == "azureopenai":
+            if not cls.AZURE_OPENAI_API_KEY:
+                raise ValueError("AZURE_OPENAI_API_KEY environment variable is required for Azure OpenAI")
+            return AzureOpenAI(
+                    api_version=cls.AZURE_OPENAI_API_VERSION,
+                    azure_endpoint=cls.AZURE_OPENAI_BASE_URL,
+                    api_key=cls.AZURE_OPENAI_API_KEY,
+                )
 
         # default to OpenAI
         if not cls.OPENAI_API_KEY:

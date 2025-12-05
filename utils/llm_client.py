@@ -1,12 +1,11 @@
 import time
+import os
+import traceback
 from typing import Mapping, List, Dict, Any, Optional
 
-import os
-from openai import OpenAI
+from openai import OpenAI, AzureOpenAI
 
 from config import Config
-import traceback
-import os
 
 
 def get_client_from_config(config: Optional[Config] = None) -> OpenAI:
@@ -22,6 +21,14 @@ def chat_completion_with_retries(
     retry_interval_sec: int = 20,
     **kwargs: Any,
 ) -> Mapping:
+    # Convert max_tokens to max_completion_tokens for Azure OpenAI
+    is_azure_openai = isinstance(client, AzureOpenAI)
+    if is_azure_openai and 'max_tokens' in kwargs:
+        kwargs['max_completion_tokens'] = kwargs.pop('max_tokens')
+    if model.startswith('gpt-5'):
+        if is_azure_openai and 'temperature' in kwargs:
+            kwargs.pop('temperature')
+    
     last_err: Optional[Exception] = None
     for attempt in range(max_retries):
         try:
@@ -39,6 +46,8 @@ def chat_completion_with_retries(
             print("LLM request failed:", flush=True)
             print(f"  ErrorType: {type(e).__name__}", flush=True)
             print(f"  ErrorRepr: {e!r}", flush=True)
+            print(f"  Error: {e}", flush=True)
+            print(f'  Model: {model}', flush=True)
             # Some SDK errors may have status/response
             status = getattr(e, 'status_code', None) or getattr(e, 'status', None)
             if status is not None:
