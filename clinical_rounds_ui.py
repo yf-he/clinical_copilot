@@ -16,6 +16,7 @@ You can choose to draft each step yourself or let the AI resident doctor suggest
 creating a collaborative human-AI diagnostic workflow.
 """
 
+import json
 import re
 from pathlib import Path
 from typing import List, Optional
@@ -30,11 +31,11 @@ from judge_agent import JudgeAgent
 from cost_estimator import CostEstimator
 from data_models import ActionType, AgentAction, GatekeeperResponse
 from utils.llm_client import chat_completion_with_retries
-import os
-from dotenv import load_dotenv
-load_dotenv()
 
-DEFAULT_DATASET = Path(__file__).parent / "shzyk/DiagnosisArena/data/test-00000-of-00001.jsonl"
+DEFAULT_DATASET = Path(
+    "/Users/yufei/Desktop/SDBench/converted/test-00000-of-00001.jsonl"
+)
+
 
 @st.cache_resource
 def load_cases(dataset_path: str) -> List[CaseFile]:
@@ -63,6 +64,8 @@ def initialize_state():
         st.session_state.action_content_pending = None
     if "llm_status" not in st.session_state:
         st.session_state.llm_status = ""
+    if "action_type_label" not in st.session_state:
+        st.session_state.action_type_label = "ask question"
 
 
 def normalize_diagnosis_text(content: str, case: CaseFile) -> str:
@@ -164,7 +167,8 @@ def suggest_action_with_llm(
     task_map = {
         ActionType.ASK_QUESTIONS: (
             "Draft a single, clinically precise bedside question for the patient or staff "
-            "that would meaningfully advance the diagnostic work-up."
+            "that would meaningfully advance the diagnostic work-up. "
+            "Avoid repeating any earlier questions; if something was previously unanswered, pivot to a different high-yield query."
         ),
         ActionType.REQUEST_TESTS: (
             "Order exactly one high-yield diagnostic test or imaging study. Include modality and any pertinent qualifiers."
@@ -197,8 +201,6 @@ Diagnosis options (choose the single best answer and quote it verbatim; reply wi
 {option_lines}
 """
 
-    print(f"Model: {model_name}", flush=True)
-    print(f'User_prompt: {user_prompt.strip()}', flush=True)
     try:
         completion = chat_completion_with_retries(
             client=client,
@@ -208,13 +210,78 @@ Diagnosis options (choose the single best answer and quote it verbatim; reply wi
                 {"role": "user", "content": user_prompt.strip()},
             ],
             temperature=temperature,
-            # max_tokens=220,
+            max_tokens=220,
         )
         content = completion.choices[0].message.content.strip()
-        print(f"Content: {content}", flush=True)
         return content
     except Exception as exc:
         st.error(f"AI resident could not draft a response: {exc}")
+        return None
+
+
+def decide_action_with_llm(
+    case: CaseFile,
+    cfg: Config,
+    model_name: str,
+    temperature: float = 0.2,
+) -> Optional[tuple[ActionType, str]]:
+    """Let the AI resident choose the action type and draft the content."""
+    if not case:
+        return None
+
+    client = cfg.get_openai_client()
+    context = build_clinical_context(case)
+    diagnosis_options = getattr(case, "diagnosis_options", [])
+
+    user_prompt = f"""
+{context}
+
+Select the single best next clinical action (ask_questions, request_tests, or diagnose).
+
+Constraints:
+- Never repeat any question already asked in this encounter; if a prior question was unanswered, do not re-ask it—choose a different, high-yield next step.
+- Keep the content one concise sentence.
+- If ordering a test, include modality/qualifiers; choose the single highest-yield test.
+- If diagnosing, provide the leading diagnosis (or pick the best option). Reply with text only—no option letters.
+
+Return a JSON object with keys "action_type" and "content". "action_type" must be one of ["ask_questions","request_tests","diagnose"]. Respond with JSON only.
+"""
+    if diagnosis_options:
+        option_lines = "\n".join(f"{chr(65 + idx)}. {opt}" for idx, opt in enumerate(diagnosis_options))
+        user_prompt += f"""
+
+Diagnosis options:
+{option_lines}
+"""
+
+    try:
+        completion = chat_completion_with_retries(
+            client=client,
+            model=model_name,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an AI resident doctor assisting the attending. "
+                        "Choose the single best next action, avoiding repeated or unanswered questions, "
+                        "and keep the output minimal."
+                    ),
+                },
+                {"role": "user", "content": user_prompt.strip()},
+            ],
+            temperature=temperature,
+            max_tokens=260,
+        )
+        raw = completion.choices[0].message.content.strip()
+        payload = json.loads(raw)
+        action_value = payload.get("action_type")
+        content = (payload.get("content") or "").strip()
+        if action_value not in {a.value for a in ActionType} or not content:
+            raise ValueError("Missing or invalid fields in AI response.")
+        action_type = ActionType(action_value)
+        return action_type, content
+    except Exception as exc:
+        st.error(f"AI resident could not select an action: {exc}")
         return None
 
 
@@ -338,6 +405,7 @@ You play the attending physician running bedside rounds on a simulated patient. 
                 "action_content_input",
                 "action_content_pending",
                 "llm_status",
+                "action_type_label",
             ]:
                 st.session_state.pop(key, None)
             st.rerun()
@@ -380,6 +448,7 @@ You play the attending physician running bedside rounds on a simulated patient. 
         "Clinical action",
         ["ask question", "request test", "diagnose"],
         format_func=lambda x: x.title(),
+        key="action_type_label",
     )
     actor_label = action_col.radio(
         "Who drafts this step?",
@@ -396,6 +465,24 @@ You play the attending physician running bedside rounds on a simulated patient. 
     diagnosis_options = getattr(case, "diagnosis_options", [])
 
     if actor_label == "AI Resident Doctor (LLM)":
+        if action_col.button("Let AI Resident Doctor decide next step", use_container_width=False):
+            with st.spinner("AI Resident Doctor choosing action..."):
+                decision = decide_action_with_llm(case, cfg, ai_model_id)
+            if decision:
+                decided_action, suggestion = decision
+                target_label = {
+                    ActionType.ASK_QUESTIONS: "ask question",
+                    ActionType.REQUEST_TESTS: "request test",
+                    ActionType.DIAGNOSE: "diagnose",
+                }[decided_action]
+                if decided_action == ActionType.DIAGNOSE:
+                    suggestion = normalize_diagnosis_text(suggestion, case)
+                st.session_state.action_type_label = target_label
+                st.session_state.action_content_pending = suggestion
+                st.session_state.llm_status = (
+                    f"Drafted and action selected by AI Resident Doctor ({ai_model_id}) → {target_label.title()}"
+                )
+                st.rerun()
         if action_col.button("Let AI Resident Doctor draft", use_container_width=False):
             with st.spinner("AI Resident Doctor drafting..."):
                 suggestion = suggest_action_with_llm(desired_action, case, cfg, ai_model_id)

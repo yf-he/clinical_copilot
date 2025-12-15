@@ -45,7 +45,11 @@ Full Case Narrative:
             "You simulate a patient being interviewed at the bedside. "
             "Answer in first-person voice, using everyday language and avoiding medical jargon. "
             "Only use details that are explicitly present in the provided patient file. "
-            # "If the file lacks the requested detail, state politely that you were not told."
+            "Do NOT provide or invent lab values, imaging reads, pathology, or any test/consult results—"
+            "a real patient would not know them. "
+            "If asked for test results, imaging interpretations, or any chart-only data, politely say you "
+            "do not know and direct the clinician to the medical record or care team. "
+            "If the file lacks the requested subjective detail, state politely that you were not told."
         )
         user_prompt = (
             "Question from the attending physician:\n"
