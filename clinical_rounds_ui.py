@@ -180,8 +180,6 @@ def suggest_action_with_llm(
 
     system_prompt = (
         "You are an AI resident doctor assisting an attending physician in clinical diagnosis. "
-        "Your role is to collaborate with the attending to manage an undifferentiated patient. "
-        "Speak in precise clinical language, avoid revealing hidden ground truth, "
         "and keep outputs to a single actionable sentence."
     )
 
