@@ -25,14 +25,14 @@ class Config:
     # Model settings (OpenRouter model IDs by default)
     # You can override with env: SDBENCH_*_MODEL variables
     # Fix Gatekeeper/Judge on 4o-mini unless explicitly overridden in code
-    GATEKEEPER_MODEL: str = os.getenv("SDBENCH_GATEKEEPER_MODEL", "openai/gpt-4o-mini")
+    GATEKEEPER_MODEL: str = os.getenv("SDBENCH_GATEKEEPER_MODEL", "gpt-5-mini")
     PATIENT_AGENT_MODEL: str = os.getenv("SDBENCH_PATIENT_MODEL", GATEKEEPER_MODEL)
     EXAMINATION_AGENT_MODEL: str = os.getenv("SDBENCH_EXAM_MODEL", GATEKEEPER_MODEL)
-    JUDGE_MODEL: str = os.getenv("SDBENCH_JUDGE_MODEL", "openai/gpt-4o-mini")
+    JUDGE_MODEL: str = os.getenv("SDBENCH_JUDGE_MODEL", "gpt-5-mini")
 
     # Azure OpenAI API settings
     AZURE_OPENAI_API_KEY: Optional[str] = os.getenv("AZURE_OPENAI_API_KEY")
-    AZURE_OPENAI_BASE_URL: str = os.getenv("AZURE_OPENAI_BASE_URL", "https://medevalkit.openai.azure.com/")
+    AZURE_OPENAI_BASE_URL: str = os.getenv("AZURE_OPENAI_BASE_URL", "https://medevalkit.openai.azure.com")
     AZURE_OPENAI_API_VERSION: str = os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
 
     # Cost settings
@@ -72,6 +72,9 @@ class Config:
         if cls.API_PROVIDER == "openrouter":
             if not cls.OPENROUTER_API_KEY:
                 raise ValueError("OPENROUTER_API_KEY environment variable is required")
+        elif cls.API_PROVIDER == "azureopenai":
+            if not cls.AZURE_OPENAI_API_KEY:
+                raise ValueError("AZURE_OPENAI_API_KEY environment variable is required for Azure OpenAI")
         else:
             if not cls.OPENAI_API_KEY:
                 raise ValueError("OPENAI_API_KEY environment variable is required")

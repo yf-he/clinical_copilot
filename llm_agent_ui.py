@@ -84,7 +84,7 @@ def main():
                 st.error(f"Failed to load dataset: {e}")
         case_ids = [case.case_id for case in cases]
         selected_case = st.selectbox("Select Case ID", case_ids, index=0 if case_ids else None, key="selected_case")
-        model_id = st.text_input("Agent Model ID", value="openai/gpt-4o-mini", key="model_id")
+        model_id = st.text_input("Agent Model ID", value="gpt-5-mini", key="model_id")
         col1, col2 = st.columns([1, 1])
         if col1.button("Next ➜", use_container_width=True) and selected_case:
             st.session_state.step = 2

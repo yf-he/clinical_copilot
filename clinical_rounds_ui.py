@@ -33,7 +33,7 @@ from data_models import ActionType, AgentAction, GatekeeperResponse
 from utils.llm_client import chat_completion_with_retries
 
 DEFAULT_DATASET = Path(
-    "/Users/yufei/Desktop/SDBench/converted/test-00000-of-00001.jsonl"
+    "C:/Users/t-yufeihe/Downloads/SDBench-main/SDBench-main/converted/converted/test-00000-of-00001.jsonl"
 )
 
 
@@ -66,6 +66,8 @@ def initialize_state():
         st.session_state.llm_status = ""
     if "action_type_label" not in st.session_state:
         st.session_state.action_type_label = "ask question"
+    if "action_type_label_pending" not in st.session_state:
+        st.session_state.action_type_label_pending = None
 
 
 def normalize_diagnosis_text(content: str, case: CaseFile) -> str:
@@ -168,10 +170,16 @@ def suggest_action_with_llm(
         ActionType.ASK_QUESTIONS: (
             "Draft a single, clinically precise bedside question for the patient or staff "
             "that would meaningfully advance the diagnostic work-up. "
-            "Avoid repeating any earlier questions; if something was previously unanswered, pivot to a different high-yield query."
+            "CRITICAL: Review all previous questions in the encounter history - do NOT ask a similar or related question. "
+            "If a question was already asked (even if unanswered), choose a completely different question or consider switching to requesting tests. "
+            "IMPORTANT: Ask about SUBJECTIVE symptoms, sensations, history, or patient experience. "
+            "Do NOT ask about test results, imaging studies, lab values, or whether prior tests/imaging are available - these should be ordered as tests, not asked as questions."
         ),
         ActionType.REQUEST_TESTS: (
-            "Order exactly one high-yield diagnostic test or imaging study. Include modality and any pertinent qualifiers."
+            "Order exactly one high-yield diagnostic test or imaging study. Include modality and any pertinent qualifiers. "
+            "CRITICAL: Review all previous test orders in the encounter history - do NOT order a similar test. "
+            "For example, if 'MRI brain' was already ordered, do NOT order 'MRI brain with contrast' or 'MRI brain and scalp' - these are considered the same test. "
+            "Choose a completely different test that has NOT been ordered yet."
         ),
         ActionType.DIAGNOSE: (
             "Provide a concise, definitive diagnosis (or leading impression) that best explains the presentation."
@@ -180,7 +188,9 @@ def suggest_action_with_llm(
 
     system_prompt = (
         "You are an AI resident doctor assisting an attending physician in clinical diagnosis. "
-        "and keep outputs to a single actionable sentence."
+        "CRITICAL: Review all previous actions in the encounter history before drafting. "
+        "NEVER repeat similar tests or questions - if a similar action was already taken, choose something completely different. "
+        "Keep outputs to a single actionable sentence."
     )
 
     user_prompt = f"""
@@ -208,9 +218,53 @@ Diagnosis options (choose the single best answer and quote it verbatim; reply wi
                 {"role": "user", "content": user_prompt.strip()},
             ],
             temperature=temperature,
-            max_tokens=220,
+            max_tokens=4000,
         )
-        content = completion.choices[0].message.content.strip()
+        
+        # Check if completion is valid (chat_completion_with_retries returns {} or error dict on failure)
+        # On success, OpenAI returns a response object with .choices attribute
+        # On failure, it returns an empty dict {} or dict with _error key
+        if not completion:
+            raise ValueError("Empty response from AI model - check API connection and model availability")
+        
+        # Check if it's a failed response (dict with _error or empty dict) vs successful response object
+        if isinstance(completion, dict):
+            if completion.get("_error"):
+                # This is the failure case with error info
+                error_msg = completion.get("_error", "Unknown error")
+                error_type = completion.get("_error_type", "Unknown")
+                raise ValueError(f"API request failed: {error_type} - {error_msg}. Check API connection, model availability ({model_name}), and API keys.")
+            elif not completion.get("choices"):
+                # Empty dict returned by chat_completion_with_retries
+                raise ValueError("API request failed after retries - check API connection, model availability, and API keys")
+        
+        # Check if completion has choices attribute (successful response object)
+        if not hasattr(completion, 'choices'):
+            raise ValueError("Invalid response structure from AI model")
+        
+        if not completion.choices or len(completion.choices) == 0:
+            raise ValueError("No choices in AI model response - model may have failed to generate output")
+        
+        message = completion.choices[0].message
+        if not hasattr(message, 'content') or message.content is None:
+            # Check if there's finish_reason that might explain the issue
+            finish_reason = getattr(completion.choices[0], 'finish_reason', None)
+            if finish_reason == 'length':
+                raise ValueError("Response was truncated - try increasing max_tokens (current: 400)")
+            elif finish_reason:
+                raise ValueError(f"Model stopped generating: finish_reason={finish_reason}")
+            raise ValueError("Empty content in AI model response - model may have failed to generate output")
+        
+        content = message.content.strip()
+        if not content:
+            # Check finish_reason for debugging
+            finish_reason = getattr(completion.choices[0], 'finish_reason', None)
+            usage_info = getattr(completion, 'usage', None)
+            debug_info = f"finish_reason={finish_reason}"
+            if usage_info:
+                debug_info += f", tokens_used={getattr(usage_info, 'total_tokens', 'N/A')}"
+            raise ValueError(f"Empty response content from AI model ({debug_info}) - try increasing max_tokens or check if model supports the request format")
+        
         return content
     except Exception as exc:
         st.error(f"AI resident could not draft a response: {exc}")
@@ -236,10 +290,21 @@ def decide_action_with_llm(
 
 Select the single best next clinical action (ask_questions, request_tests, or diagnose).
 
-Constraints:
-- Never repeat any question already asked in this encounter; if a prior question was unanswered, do not re-ask it—choose a different, high-yield next step.
+ACTION SELECTION PRIORITY (in order):
+1. **PREFER ask_questions** - Ask clinical questions to gather more information before ordering tests. Only order tests if you have already asked several relevant questions or if a test is clearly the next critical step.
+2. **request_tests** - Only order tests when you have sufficient information from questions, or when a specific test is urgently needed for diagnosis.
+3. **diagnose** - Only diagnose when you have gathered enough information through questions and/or tests.
+
+CRITICAL CONSTRAINTS - READ ALL PREVIOUS ACTIONS FIRST:
+- **NEVER repeat or request similar tests/questions already in the encounter history above.**
+- **PREFER asking questions** - Before ordering expensive tests, ask relevant clinical questions first to narrow down the differential.
+- **For questions**: Ask about SUBJECTIVE symptoms, sensations, patient experience, history, or physical characteristics the patient can describe. 
+  **DO NOT ask about test results, imaging studies, lab values, or whether prior tests/imaging are available** - these should be ordered as tests, not asked as questions.
+- **For test orders**: If a similar test was already ordered (e.g., "MRI brain" vs "MRI brain with contrast"), choose a DIFFERENT test or action type entirely. Consider asking a question instead.
+- **For questions**: If a similar question was already asked, choose a completely different question or switch to requesting tests/diagnosis.
+- **Review the entire encounter history** - if your proposed action is similar to any previous action, choose something different.
 - Keep the content one concise sentence.
-- If ordering a test, include modality/qualifiers; choose the single highest-yield test.
+- If ordering a test, include modality/qualifiers; choose the single highest-yield test that has NOT been ordered yet.
 - If diagnosing, provide the leading diagnosis (or pick the best option). Reply with text only—no option letters.
 
 Return a JSON object with keys "action_type" and "content". "action_type" must be one of ["ask_questions","request_tests","diagnose"]. Respond with JSON only.
@@ -261,23 +326,94 @@ Diagnosis options:
                     "role": "system",
                     "content": (
                         "You are an AI resident doctor assisting the attending. "
-                        "Choose the single best next action, avoiding repeated or unanswered questions, "
-                        "and keep the output minimal."
+                        "CRITICAL: Before choosing an action, carefully review ALL previous actions in the encounter history. "
+                        "PREFER asking clinical questions over ordering tests - gather information through questions first before requesting expensive tests. "
+                        "NEVER repeat similar tests or questions - if 'MRI brain' was ordered, do NOT order 'MRI brain with contrast' or similar variants. "
+                        "If a similar action was already taken, choose something completely different. "
+                        "Keep the output minimal and respond with ONLY valid JSON, no markdown formatting or extra text."
                     ),
                 },
                 {"role": "user", "content": user_prompt.strip()},
             ],
             temperature=temperature,
-            max_tokens=260,
+            max_tokens=5000,
         )
-        raw = completion.choices[0].message.content.strip()
-        payload = json.loads(raw)
+        
+        # Check if completion is valid (chat_completion_with_retries returns {} or error dict on failure)
+        # On success, OpenAI returns a response object with .choices attribute
+        # On failure, it returns an empty dict {} or dict with _error key
+        if not completion:
+            raise ValueError("Empty response from AI model - check API connection and model availability")
+        
+        # Check if it's a failed response (dict with _error or empty dict) vs successful response object
+        if isinstance(completion, dict):
+            if completion.get("_error"):
+                # This is the failure case with error info
+                error_msg = completion.get("_error", "Unknown error")
+                error_type = completion.get("_error_type", "Unknown")
+                raise ValueError(f"API request failed: {error_type} - {error_msg}. Check API connection, model availability ({model_name}), and API keys.")
+            elif not completion.get("choices"):
+                # Empty dict returned by chat_completion_with_retries
+                raise ValueError("API request failed after retries - check API connection, model availability, and API keys")
+        
+        # Check if completion has choices attribute (successful response object)
+        if not hasattr(completion, 'choices'):
+            raise ValueError("Invalid response structure from AI model")
+        
+        if not completion.choices or len(completion.choices) == 0:
+            raise ValueError("No choices in AI model response - model may have failed to generate output")
+        
+        message = completion.choices[0].message
+        if not hasattr(message, 'content') or message.content is None:
+            # Check if there's finish_reason that might explain the issue
+            finish_reason = getattr(completion.choices[0], 'finish_reason', None)
+            if finish_reason == 'length':
+                raise ValueError("Response was truncated - try increasing max_tokens (current: 500)")
+            elif finish_reason:
+                raise ValueError(f"Model stopped generating: finish_reason={finish_reason}")
+            raise ValueError("Empty content in AI model response - model may have failed to generate output")
+        
+        raw = message.content.strip()
+        if not raw:
+            # Check finish_reason for debugging
+            finish_reason = getattr(completion.choices[0], 'finish_reason', None)
+            usage_info = getattr(completion, 'usage', None)
+            debug_info = f"finish_reason={finish_reason}"
+            if usage_info:
+                debug_info += f", tokens_used={getattr(usage_info, 'total_tokens', 'N/A')}"
+            raise ValueError(f"Empty response content from AI model ({debug_info}) - try increasing max_tokens or check if model supports the request format")
+        
+        # Try to extract JSON from markdown code blocks if present
+        json_text = raw
+        if "```json" in raw:
+            # Extract JSON from ```json ... ``` block
+            start = raw.find("```json") + 7
+            end = raw.find("```", start)
+            if end != -1:
+                json_text = raw[start:end].strip()
+        elif "```" in raw:
+            # Extract JSON from ``` ... ``` block
+            start = raw.find("```") + 3
+            end = raw.find("```", start)
+            if end != -1:
+                json_text = raw[start:end].strip()
+        else:
+            # Try to find JSON object in the text
+            start = raw.find("{")
+            end = raw.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                json_text = raw[start:end+1]
+        
+        payload = json.loads(json_text)
         action_value = payload.get("action_type")
         content = (payload.get("content") or "").strip()
         if action_value not in {a.value for a in ActionType} or not content:
             raise ValueError("Missing or invalid fields in AI response.")
         action_type = ActionType(action_value)
         return action_type, content
+    except json.JSONDecodeError as exc:
+        st.error(f"AI resident returned invalid JSON. Raw response: {raw[:200] if 'raw' in locals() else 'N/A'}")
+        return None
     except Exception as exc:
         st.error(f"AI resident could not select an action: {exc}")
         return None
@@ -390,7 +526,7 @@ You play the attending physician running bedside rounds on a simulated patient. 
     with st.sidebar:
         st.header("Clinical Setup")
         dataset_path = st.text_input("Dataset (.sdbench.jsonl)", value=str(DEFAULT_DATASET))
-        ai_model_id = st.text_input("AI Resident Doctor Model", value="openai/gpt-4o-mini")
+        ai_model_id = st.text_input("AI Resident Doctor Model", value="gpt-5-mini")
         if st.button("Reset Encounter"):
             for key in [
                 "case",
@@ -404,6 +540,7 @@ You play the attending physician running bedside rounds on a simulated patient. 
                 "action_content_pending",
                 "llm_status",
                 "action_type_label",
+                "action_type_label_pending",
             ]:
                 st.session_state.pop(key, None)
             st.rerun()
@@ -440,11 +577,19 @@ You play the attending physician running bedside rounds on a simulated patient. 
         st.session_state.action_content_input = st.session_state.action_content_pending
         st.session_state.action_content_pending = None
 
+    # Handle pending action type label before creating the widget
+    action_options = ["ask question", "request test", "diagnose"]
+    if st.session_state.action_type_label_pending is not None:
+        pending_label = st.session_state.action_type_label_pending
+        if pending_label in action_options:
+            st.session_state.action_type_label = pending_label
+        st.session_state.action_type_label_pending = None
+
     st.subheader("Plan the Next Step")
     action_col, submit_col = st.columns([4, 1])
     action_type_label = action_col.selectbox(
         "Clinical action",
-        ["ask question", "request test", "diagnose"],
+        action_options,
         format_func=lambda x: x.title(),
         key="action_type_label",
     )
@@ -463,7 +608,7 @@ You play the attending physician running bedside rounds on a simulated patient. 
     diagnosis_options = getattr(case, "diagnosis_options", [])
 
     if actor_label == "AI Resident Doctor (LLM)":
-        if action_col.button("Let AI Resident Doctor decide next step", use_container_width=False):
+        if action_col.button("AI Resident: Choose Action & Draft", use_container_width=False):
             with st.spinner("AI Resident Doctor choosing action..."):
                 decision = decide_action_with_llm(case, cfg, ai_model_id)
             if decision:
@@ -475,13 +620,13 @@ You play the attending physician running bedside rounds on a simulated patient. 
                 }[decided_action]
                 if decided_action == ActionType.DIAGNOSE:
                     suggestion = normalize_diagnosis_text(suggestion, case)
-                st.session_state.action_type_label = target_label
+                st.session_state.action_type_label_pending = target_label
                 st.session_state.action_content_pending = suggestion
                 st.session_state.llm_status = (
                     f"Drafted and action selected by AI Resident Doctor ({ai_model_id}) → {target_label.title()}"
                 )
                 st.rerun()
-        if action_col.button("Let AI Resident Doctor draft", use_container_width=False):
+        if action_col.button("AI Resident: Draft Content Only", use_container_width=False):
             with st.spinner("AI Resident Doctor drafting..."):
                 suggestion = suggest_action_with_llm(desired_action, case, cfg, ai_model_id)
             if suggestion:

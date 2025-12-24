@@ -1,5 +1,6 @@
 """Examination Agent that surfaces objective findings/tests from the case file."""
 
+import re
 from dataclasses import dataclass
 
 from config import Config
@@ -15,6 +16,24 @@ def _trim_case_text(text: str, max_chars: int = MAX_CONTEXT_CHARS) -> str:
     return text[:max_chars] + "\n...[truncated]..."
 
 
+def _sanitize_case_text(case_text: str) -> str:
+    """Remove diagnosis options and ground truth from case text to prevent agents from seeing answers."""
+    # Remove the OPTIONS section if present
+    lines = case_text.split('\n')
+    sanitized_lines = []
+    
+    for line in lines:
+        # Stop at OPTIONS section
+        if line.strip().upper() == "OPTIONS":
+            break
+        # Skip lines that look like option labels (A., B., C., D.)
+        if re.match(r'^[A-D][\.\):]\s+', line.strip(), re.IGNORECASE):
+            continue
+        sanitized_lines.append(line)
+    
+    return '\n'.join(sanitized_lines).strip()
+
+
 @dataclass
 class ExaminationAgent:
     """Simulated clinical information system for objective data."""
@@ -26,18 +45,20 @@ class ExaminationAgent:
         self.model = getattr(
             self.config,
             "EXAMINATION_AGENT_MODEL",
-            getattr(self.config, "GATEKEEPER_MODEL", "openai/gpt-4o-mini"),
+            getattr(self.config, "GATEKEEPER_MODEL", "gpt-5-mini"),
         )
 
     def fetch_result(self, request: str, case_file: CaseFile) -> GatekeeperResponse:
         """Return objective data for ordered tests or examinations."""
+        # Sanitize case text to remove diagnosis options and ground truth
+        sanitized_case_text = _sanitize_case_text(case_file.full_case_text)
         case_context = f"""Patient Case File
 --------------------
 Initial Abstract:
 {case_file.initial_abstract}
 
 Full Case Narrative:
-{_trim_case_text(case_file.full_case_text)}
+{_trim_case_text(sanitized_case_text)}
 """
 
         system_prompt = (
@@ -61,7 +82,7 @@ Full Case Narrative:
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.2,
-            max_tokens=320,
+            max_tokens=800,
         )
         content = completion.choices[0].message.content.strip()
         if not content:
